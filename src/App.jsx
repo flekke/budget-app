@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { supabase } from "./supabase.js";
 
 const DEFAULT_CATEGORIES = [
@@ -11,22 +11,15 @@ const DEFAULT_CATEGORIES = [
   { id: "other", name: "Other", emoji: "📦", budget: 2000, sort_order: 6 },
 ];
 
-const MONTHS_NO = [
-  "Januar","Februar","Mars","April","Mai","Juni",
-  "Juli","August","September","Oktober","November","Desember",
-];
-
 const genId = () => Math.random().toString(36).slice(2, 10);
 const todayStr = () => new Date().toISOString().slice(0, 10);
-const getYM = (d) => d.slice(0, 7);
-const currentYM = () => getYM(todayStr());
 
 const formatKr = (n) =>
   n.toLocaleString("nb-NO", { maximumFractionDigits: 0 }) + " kr";
 
-const monthLabel = (ym) => {
-  const [y, m] = ym.split("-");
-  return `${MONTHS_NO[parseInt(m) - 1]} ${y}`;
+const formatDateShort = (d) => {
+  const [y, m, day] = d.split("-");
+  return `${parseInt(m)}/${parseInt(day)}`;
 };
 
 const barColor = (ratio) => {
@@ -38,6 +31,8 @@ const barColor = (ratio) => {
 export default function App() {
   const [categories, setCategories] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [periods, setPeriods] = useState([]);
+  const [activePeriod, setActivePeriod] = useState(null);
   const [screen, setScreen] = useState("main");
   const [loading, setLoading] = useState(true);
   const [showMenu, setShowMenu] = useState(false);
@@ -52,68 +47,62 @@ export default function App() {
   const [newCatBudget, setNewCatBudget] = useState("");
   const [newCatEmoji, setNewCatEmoji] = useState("📌");
 
-  const [historyMonth, setHistoryMonth] = useState(null);
+  const [periodName, setPeriodName] = useState("");
+  const [periodStart, setPeriodStart] = useState(todayStr());
+  const [periodEnd, setPeriodEnd] = useState("");
+  const [editingPeriodId, setEditingPeriodId] = useState(null);
+
+  const [historyPeriod, setHistoryPeriod] = useState(null);
   const [searchQ, setSearchQ] = useState("");
   const [editingExpense, setEditingExpense] = useState(null);
 
-  // ─── LOAD DATA ───
   useEffect(() => {
     (async () => {
-      // Load categories
       const { data: cats } = await supabase
-        .from("categories")
-        .select("*")
-        .order("sort_order");
-
+        .from("categories").select("*").order("sort_order");
       if (cats && cats.length > 0) {
         setCategories(cats);
       } else {
-        // First time: seed default categories
         const { data: seeded } = await supabase
-          .from("categories")
-          .upsert(DEFAULT_CATEGORIES)
-          .select();
+          .from("categories").upsert(DEFAULT_CATEGORIES).select();
         setCategories(seeded || DEFAULT_CATEGORIES);
       }
 
-      // Load expenses
       const { data: exps } = await supabase
-        .from("expenses")
-        .select("*")
-        .order("date", { ascending: false });
+        .from("expenses").select("*").order("date", { ascending: false });
       setExpenses(exps || []);
+
+      const { data: pds } = await supabase
+        .from("periods").select("*").order("start_date", { ascending: false });
+      setPeriods(pds || []);
+
+      const t = todayStr();
+      const active = (pds || []).find((p) => p.start_date <= t && p.end_date >= t);
+      if (active) setActivePeriod(active);
 
       setLoading(false);
     })();
   }, []);
 
-  // ─── EXPENSE HELPERS ───
-  const monthExpenses = (ym) => expenses.filter((e) => getYM(e.date) === ym);
-  const catSpent = (catId, ym) =>
-    monthExpenses(ym)
+  const periodExpenses = (period) =>
+    expenses.filter((e) => e.date >= period.start_date && e.date <= period.end_date);
+
+  const catSpent = (catId, period) =>
+    periodExpenses(period)
       .filter((e) => e.category_id === catId)
       .reduce((s, e) => s + e.amount, 0);
-
-  const allMonths = () => {
-    const set = new Set(expenses.map((e) => getYM(e.date)));
-    return [...set].sort().reverse();
-  };
 
   const getCatName = (id) => {
     const c = categories.find((c) => c.id === id);
     return c ? `${c.emoji} ${c.name}` : id;
   };
 
-  // ─── HANDLERS ───
   const handleAddExpense = async () => {
     const amt = parseFloat(addAmount);
     if (!amt || !addCat) return;
     const exp = {
-      id: genId(),
-      amount: amt,
-      category_id: addCat,
-      memo: addMemo.trim(),
-      date: addDate,
+      id: genId(), amount: amt, category_id: addCat,
+      memo: addMemo.trim(), date: addDate,
     };
     const { data } = await supabase.from("expenses").insert(exp).select();
     if (data) setExpenses([data[0], ...expenses]);
@@ -131,32 +120,18 @@ export default function App() {
     const amt = parseFloat(editingExpense.amount);
     if (!amt || !editingExpense.category_id) return;
     const updates = {
-      amount: amt,
-      category_id: editingExpense.category_id,
-      memo: editingExpense.memo,
-      date: editingExpense.date,
+      amount: amt, category_id: editingExpense.category_id,
+      memo: editingExpense.memo, date: editingExpense.date,
     };
     await supabase.from("expenses").update(updates).eq("id", editingExpense.id);
-    setExpenses(expenses.map((e) =>
-      e.id === editingExpense.id ? { ...e, ...updates } : e
-    ));
+    setExpenses(expenses.map((e) => e.id === editingExpense.id ? { ...e, ...updates } : e));
     setEditingExpense(null);
   };
 
   const handleSaveCategories = async () => {
-    const valid = editCats
-      .filter((c) => c.name.trim())
-      .map((c, i) => ({ ...c, sort_order: i }));
-
-    // Delete removed categories
-    const removedIds = categories
-      .filter((c) => !valid.find((v) => v.id === c.id))
-      .map((c) => c.id);
-    if (removedIds.length) {
-      await supabase.from("categories").delete().in("id", removedIds);
-    }
-
-    // Upsert remaining
+    const valid = editCats.filter((c) => c.name.trim()).map((c, i) => ({ ...c, sort_order: i }));
+    const removedIds = categories.filter((c) => !valid.find((v) => v.id === c.id)).map((c) => c.id);
+    if (removedIds.length) await supabase.from("categories").delete().in("id", removedIds);
     await supabase.from("categories").upsert(valid);
     setCategories(valid);
     setScreen("main");
@@ -165,17 +140,55 @@ export default function App() {
   const handleAddCategory = () => {
     if (!newCatName.trim() || !newCatBudget) return;
     setEditCats([...editCats, {
-      id: genId(),
-      name: newCatName.trim(),
-      budget: parseFloat(newCatBudget),
-      emoji: newCatEmoji || "📌",
-      sort_order: editCats.length,
+      id: genId(), name: newCatName.trim(), budget: parseFloat(newCatBudget),
+      emoji: newCatEmoji || "📌", sort_order: editCats.length,
     }]);
     setNewCatName(""); setNewCatBudget(""); setNewCatEmoji("📌");
   };
 
+  const handleCreatePeriod = async () => {
+    if (!periodName.trim() || !periodStart || !periodEnd) return;
+    if (periodEnd <= periodStart) return;
+
+    if (editingPeriodId) {
+      const updates = { name: periodName.trim(), start_date: periodStart, end_date: periodEnd };
+      await supabase.from("periods").update(updates).eq("id", editingPeriodId);
+      const updated = periods.map((p) => p.id === editingPeriodId ? { ...p, ...updates } : p);
+      setPeriods(updated);
+      if (activePeriod?.id === editingPeriodId) setActivePeriod({ ...activePeriod, ...updates });
+    } else {
+      const p = {
+        id: genId(), name: periodName.trim(),
+        start_date: periodStart, end_date: periodEnd,
+      };
+      const { data } = await supabase.from("periods").insert(p).select();
+      if (data) {
+        setPeriods([data[0], ...periods]);
+        setActivePeriod(data[0]);
+      }
+    }
+    setPeriodName(""); setPeriodStart(todayStr()); setPeriodEnd("");
+    setEditingPeriodId(null);
+    setScreen("main");
+  };
+
+  const handleDeletePeriod = async (id) => {
+    await supabase.from("periods").delete().eq("id", id);
+    setPeriods(periods.filter((p) => p.id !== id));
+    if (activePeriod?.id === id) setActivePeriod(null);
+  };
+
+  const openEditPeriod = (period) => {
+    setPeriodName(period.name);
+    setPeriodStart(period.start_date);
+    setPeriodEnd(period.end_date);
+    setEditingPeriodId(period.id);
+    setScreen("newPeriod");
+  };
+
   const totalBudget = categories.reduce((s, c) => s + c.budget, 0);
-  const totalSpent = categories.reduce((s, c) => s + catSpent(c.id, currentYM()), 0);
+  const totalSpent = activePeriod
+    ? categories.reduce((s, c) => s + catSpent(c.id, activePeriod), 0) : 0;
 
   if (loading) {
     return (
@@ -186,14 +199,70 @@ export default function App() {
     );
   }
 
-  // ─── MAIN SCREEN ───
+  // ═══ MAIN ═══
   if (screen === "main") {
+    if (!activePeriod) {
+      return (
+        <div style={S.app}>
+          <div style={S.header}>
+            <h1 style={S.title}>Budget Tracker</h1>
+            <div style={{ position: "relative" }}>
+              <button style={S.iconBtn} onClick={() => setShowMenu(!showMenu)}>⚙️</button>
+              {showMenu && (
+                <>
+                  <div style={S.menuBackdrop} onClick={() => setShowMenu(false)} />
+                  <div style={S.menu}>
+                    <button style={S.menuItem} onClick={() => { setShowMenu(false); setEditCats([...categories]); setScreen("editCats"); }}>
+                      ✏️ Edit Categories
+                    </button>
+                    <button style={S.menuItem} onClick={() => { setShowMenu(false); setHistoryPeriod(null); setSearchQ(""); setScreen("history"); }}>
+                      📅 Past Records
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+          <div style={S.emptyState}>
+            <div style={S.emptyIcon}>📋</div>
+            <p style={S.emptyTitle}>No active budget period</p>
+            <p style={S.emptyDesc}>Create a new budget period to start tracking.</p>
+            <button style={{ ...S.primaryBtn, maxWidth: 280, margin: "20px auto 0" }}
+              onClick={() => {
+                setPeriodName(""); setPeriodStart(todayStr()); setPeriodEnd("");
+                setEditingPeriodId(null); setScreen("newPeriod");
+              }}>
+              + New Period
+            </button>
+            {periods.length > 0 && (
+              <div style={{ marginTop: 32, width: "100%", padding: "0 20px" }}>
+                <p style={{ ...S.label, textAlign: "center", marginBottom: 12 }}>Or select an existing period</p>
+                {periods.slice(0, 5).map((p) => (
+                  <button key={p.id} style={{ ...S.monthCard, marginBottom: 8 }}
+                    onClick={() => setActivePeriod(p)}>
+                    <div style={{ flex: 1, textAlign: "left" }}>
+                      <span style={S.monthName}>{p.name}</span>
+                      <span style={S.periodDates}>{formatDateShort(p.start_date)} – {formatDateShort(p.end_date)}</span>
+                    </div>
+                    <span style={{ color: "#9ca3af" }}>→</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div style={S.app}>
         <div style={S.header}>
-          <div>
-            <h1 style={S.title}>{monthLabel(currentYM())}</h1>
-            <p style={S.subtitle}>{formatKr(totalSpent)} / {formatKr(totalBudget)}</p>
+          <div style={{ flex: 1 }}>
+            <h1 style={S.title}>{activePeriod.name}</h1>
+            <p style={S.subtitle}>
+              {formatDateShort(activePeriod.start_date)} – {formatDateShort(activePeriod.end_date)}
+              {" · "}{formatKr(totalSpent)} / {formatKr(totalBudget)}
+            </p>
           </div>
           <div style={{ position: "relative" }}>
             <button style={S.iconBtn} onClick={() => setShowMenu(!showMenu)}>⚙️</button>
@@ -201,11 +270,24 @@ export default function App() {
               <>
                 <div style={S.menuBackdrop} onClick={() => setShowMenu(false)} />
                 <div style={S.menu}>
-                  <button style={S.menuItem} onClick={() => { setShowMenu(false); setEditCats([...categories]); setScreen("editCats"); }}>
-                    ✏️ Edit Categories
+                  <button style={S.menuItem} onClick={() => { setShowMenu(false); openEditPeriod(activePeriod); }}>
+                    ✏️ Edit Period
                   </button>
-                  <button style={S.menuItem} onClick={() => { setShowMenu(false); setHistoryMonth(null); setSearchQ(""); setScreen("history"); }}>
+                  <button style={S.menuItem} onClick={() => {
+                    setShowMenu(false); setPeriodName(""); setPeriodStart(todayStr()); setPeriodEnd("");
+                    setEditingPeriodId(null); setScreen("newPeriod");
+                  }}>
+                    📋 New Period
+                  </button>
+                  <button style={S.menuItem} onClick={() => { setShowMenu(false); setEditCats([...categories]); setScreen("editCats"); }}>
+                    🏷️ Edit Categories
+                  </button>
+                  <div style={S.menuDivider} />
+                  <button style={S.menuItem} onClick={() => { setShowMenu(false); setHistoryPeriod(null); setSearchQ(""); setScreen("history"); }}>
                     📅 Past Records
+                  </button>
+                  <button style={S.menuItem} onClick={() => { setShowMenu(false); setActivePeriod(null); }}>
+                    🔄 Switch Period
                   </button>
                 </div>
               </>
@@ -223,7 +305,7 @@ export default function App() {
 
         <div style={S.catList}>
           {categories.map((cat) => {
-            const spent = catSpent(cat.id, currentYM());
+            const spent = catSpent(cat.id, activePeriod);
             const ratio = cat.budget > 0 ? spent / cat.budget : 0;
             const colors = barColor(ratio);
             return (
@@ -237,28 +319,22 @@ export default function App() {
                 </div>
                 <div style={{ ...S.barBg, background: colors.bg }}>
                   <div style={{
-                    ...S.barFill,
-                    width: `${Math.min(ratio * 100, 100)}%`,
-                    background: colors.bar,
+                    ...S.barFill, width: `${Math.min(ratio * 100, 100)}%`, background: colors.bar,
                   }} />
                 </div>
-                {ratio >= 1 && (
-                  <p style={S.overBudget}>Over budget by {formatKr(spent - cat.budget)}</p>
-                )}
+                {ratio >= 1 && <p style={S.overBudget}>Over budget by {formatKr(spent - cat.budget)}</p>}
               </div>
             );
           })}
         </div>
 
-        <button
-          style={S.fab}
-          onClick={() => { setAddCat(categories[0]?.id || ""); setAddDate(todayStr()); setScreen("add"); }}
-        >+</button>
+        <button style={S.fab}
+          onClick={() => { setAddCat(categories[0]?.id || ""); setAddDate(todayStr()); setScreen("add"); }}>+</button>
       </div>
     );
   }
 
-  // ─── ADD EXPENSE ───
+  // ═══ ADD EXPENSE ═══
   if (screen === "add") {
     return (
       <div style={S.app}>
@@ -271,33 +347,61 @@ export default function App() {
           <label style={S.label}>Amount (kr)</label>
           <input style={S.input} type="number" inputMode="decimal" placeholder="0"
             value={addAmount} onChange={(e) => setAddAmount(e.target.value)} autoFocus />
-
           <label style={S.label}>Category</label>
           <select style={S.select} value={addCat} onChange={(e) => setAddCat(e.target.value)}>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>{c.emoji} {c.name}</option>
-            ))}
+            {categories.map((c) => <option key={c.id} value={c.id}>{c.emoji} {c.name}</option>)}
           </select>
-
           <label style={S.label}>Date</label>
-          <input style={S.input} type="date" value={addDate}
-            onChange={(e) => setAddDate(e.target.value)} />
-
+          <input style={S.input} type="date" value={addDate} onChange={(e) => setAddDate(e.target.value)} />
           <label style={S.label}>Memo (optional)</label>
           <input style={S.input} type="text" placeholder="e.g. Rema 1000"
             value={addMemo} onChange={(e) => setAddMemo(e.target.value)} />
-
-          <button
-            style={{ ...S.primaryBtn, opacity: addAmount && addCat ? 1 : 0.4 }}
-            onClick={handleAddExpense}
-            disabled={!addAmount || !addCat}
-          >Add Expense</button>
+          <button style={{ ...S.primaryBtn, opacity: addAmount && addCat ? 1 : 0.4 }}
+            onClick={handleAddExpense} disabled={!addAmount || !addCat}>Add Expense</button>
         </div>
       </div>
     );
   }
 
-  // ─── EDIT CATEGORIES ───
+  // ═══ NEW/EDIT PERIOD ═══
+  if (screen === "newPeriod") {
+    const isEdit = !!editingPeriodId;
+    return (
+      <div style={S.app}>
+        <div style={S.screenHeader}>
+          <button style={S.backBtn} onClick={() => { setEditingPeriodId(null); setScreen("main"); }}>← Back</button>
+          <h2 style={S.screenTitle}>{isEdit ? "Edit Period" : "New Period"}</h2>
+          <div style={{ width: 60 }} />
+        </div>
+        <div style={S.form}>
+          <label style={S.label}>Period Name</label>
+          <input style={S.input} type="text" placeholder="e.g. March Budget"
+            value={periodName} onChange={(e) => setPeriodName(e.target.value)} autoFocus />
+          <label style={S.label}>Start Date</label>
+          <input style={S.input} type="date" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} />
+          <label style={S.label}>End Date</label>
+          <input style={S.input} type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} />
+          {periodEnd && periodEnd <= periodStart && (
+            <p style={S.overBudget}>End date must be after start date</p>
+          )}
+          <button
+            style={{ ...S.primaryBtn, opacity: periodName && periodStart && periodEnd && periodEnd > periodStart ? 1 : 0.4 }}
+            onClick={handleCreatePeriod}
+            disabled={!periodName || !periodStart || !periodEnd || periodEnd <= periodStart}>
+            {isEdit ? "Save Changes" : "Create Period"}
+          </button>
+          {isEdit && (
+            <button style={{ ...S.dangerBtn, marginTop: 12 }}
+              onClick={() => { handleDeletePeriod(editingPeriodId); setEditingPeriodId(null); setScreen("main"); }}>
+              Delete Period
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══ EDIT CATEGORIES ═══
   if (screen === "editCats") {
     return (
       <div style={S.app}>
@@ -316,8 +420,7 @@ export default function App() {
               <input style={{ ...S.input, width: 90, marginBottom: 0, textAlign: "right" }}
                 type="number" value={cat.budget}
                 onChange={(e) => { const c = [...editCats]; c[i] = { ...c[i], budget: parseFloat(e.target.value) || 0 }; setEditCats(c); }} />
-              <button style={S.deleteBtn}
-                onClick={() => setEditCats(editCats.filter((_, j) => j !== i))}>✕</button>
+              <button style={S.deleteBtn} onClick={() => setEditCats(editCats.filter((_, j) => j !== i))}>✕</button>
             </div>
           ))}
         </div>
@@ -326,8 +429,7 @@ export default function App() {
           <input style={{ ...S.input, flex: 1, marginBottom: 0 }} placeholder="Name"
             value={newCatName} onChange={(e) => setNewCatName(e.target.value)} />
           <input style={{ ...S.input, width: 90, marginBottom: 0, textAlign: "right" }}
-            type="number" placeholder="Budget" value={newCatBudget}
-            onChange={(e) => setNewCatBudget(e.target.value)} />
+            type="number" placeholder="Budget" value={newCatBudget} onChange={(e) => setNewCatBudget(e.target.value)} />
           <button style={{ ...S.addCatBtn, opacity: newCatName && newCatBudget ? 1 : 0.4 }}
             onClick={handleAddCategory} disabled={!newCatName || !newCatBudget}>+</button>
         </div>
@@ -335,11 +437,11 @@ export default function App() {
     );
   }
 
-  // ─── HISTORY ───
+  // ═══ HISTORY ═══
   if (screen === "history") {
-    const months = allMonths();
-    const filtered = historyMonth
-      ? monthExpenses(historyMonth).filter((e) =>
+    const sortedPeriods = [...periods].sort((a, b) => b.start_date.localeCompare(a.start_date));
+    const filtered = historyPeriod
+      ? periodExpenses(historyPeriod).filter((e) =>
           !searchQ ||
           getCatName(e.category_id).toLowerCase().includes(searchQ.toLowerCase()) ||
           (e.memo || "").toLowerCase().includes(searchQ.toLowerCase()) ||
@@ -351,22 +453,25 @@ export default function App() {
       <div style={S.app}>
         <div style={S.screenHeader}>
           <button style={S.backBtn} onClick={() => {
-            if (historyMonth) { setHistoryMonth(null); setSearchQ(""); }
+            if (historyPeriod) { setHistoryPeriod(null); setSearchQ(""); setEditingExpense(null); }
             else setScreen("main");
           }}>← Back</button>
-          <h2 style={S.screenTitle}>{historyMonth ? monthLabel(historyMonth) : "Past Records"}</h2>
+          <h2 style={S.screenTitle}>{historyPeriod ? historyPeriod.name : "Past Records"}</h2>
           <div style={{ width: 60 }} />
         </div>
 
-        {!historyMonth ? (
+        {!historyPeriod ? (
           <div style={S.monthList}>
-            {months.length === 0 && <p style={S.empty}>No records yet</p>}
-            {months.map((ym) => {
-              const total = monthExpenses(ym).reduce((s, e) => s + e.amount, 0);
-              const count = monthExpenses(ym).length;
+            {sortedPeriods.length === 0 && <p style={S.empty}>No records yet</p>}
+            {sortedPeriods.map((p) => {
+              const total = periodExpenses(p).reduce((s, e) => s + e.amount, 0);
+              const count = periodExpenses(p).length;
               return (
-                <button key={ym} style={S.monthCard} onClick={() => setHistoryMonth(ym)}>
-                  <span style={S.monthName}>{monthLabel(ym)}</span>
+                <button key={p.id} style={S.monthCard} onClick={() => setHistoryPeriod(p)}>
+                  <div style={{ flex: 1, textAlign: "left" }}>
+                    <span style={S.monthName}>{p.name}</span>
+                    <span style={S.periodDates}>{formatDateShort(p.start_date)} – {formatDateShort(p.end_date)}</span>
+                  </div>
                   <span style={S.monthMeta}>{count} items · {formatKr(total)}</span>
                   <span style={{ color: "#9ca3af" }}>→</span>
                 </button>
@@ -375,9 +480,11 @@ export default function App() {
           </div>
         ) : (
           <>
+            <p style={S.historySubtitle}>
+              {formatDateShort(historyPeriod.start_date)} – {formatDateShort(historyPeriod.end_date)}
+            </p>
             <input style={{ ...S.input, margin: "0 20px 12px" }} type="text"
-              placeholder="🔍 Search..." value={searchQ}
-              onChange={(e) => setSearchQ(e.target.value)} />
+              placeholder="🔍 Search..." value={searchQ} onChange={(e) => setSearchQ(e.target.value)} />
             <div style={S.expenseList}>
               {filtered.length === 0 && <p style={S.empty}>No matching records</p>}
               {filtered.sort((a, b) => b.date.localeCompare(a.date)).map((exp) => (
@@ -436,7 +543,6 @@ export default function App() {
   return null;
 }
 
-// ─── STYLES ───
 const F = "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif";
 
 const S = {
@@ -444,12 +550,13 @@ const S = {
   loadingWrap: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100vh" },
   spinner: { width: 32, height: 32, border: "3px solid #e5e7eb", borderTopColor: "#2d6a4f", borderRadius: "50%", animation: "spin 0.8s linear infinite" },
   header: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "28px 20px 16px" },
-  title: { fontSize: 26, fontWeight: 700, margin: 0, letterSpacing: "-0.5px", color: "#111827" },
-  subtitle: { fontSize: 14, color: "#6b7280", margin: "4px 0 0" },
+  title: { fontSize: 24, fontWeight: 700, margin: 0, letterSpacing: "-0.5px", color: "#111827" },
+  subtitle: { fontSize: 13, color: "#6b7280", margin: "4px 0 0", lineHeight: 1.4 },
   iconBtn: { background: "none", border: "none", fontSize: 22, cursor: "pointer", padding: 8, borderRadius: 8 },
   menuBackdrop: { position: "fixed", inset: 0, zIndex: 90 },
   menu: { position: "absolute", right: 0, top: 44, background: "#fff", borderRadius: 12, boxShadow: "0 8px 30px rgba(0,0,0,0.12)", padding: 6, zIndex: 100, minWidth: 180, border: "1px solid #f0f0f0" },
   menuItem: { display: "block", width: "100%", padding: "10px 14px", border: "none", background: "none", textAlign: "left", fontSize: 14, fontFamily: F, cursor: "pointer", borderRadius: 8, color: "#374151" },
+  menuDivider: { height: 1, background: "#f3f4f6", margin: "4px 8px" },
   overallBar: { margin: "0 20px 20px", height: 6, background: "#f3f4f6", borderRadius: 3, overflow: "hidden" },
   overallFill: { height: "100%", borderRadius: 3, transition: "width 0.5s ease" },
   catList: { padding: "0 20px", display: "flex", flexDirection: "column", gap: 14 },
@@ -472,16 +579,23 @@ const S = {
   select: { display: "block", width: "100%", padding: "12px 14px", fontSize: 16, border: "1.5px solid #e5e7eb", borderRadius: 10, marginBottom: 18, fontFamily: F, outline: "none", boxSizing: "border-box", background: "#fafafa", color: "#111827" },
   primaryBtn: { display: "block", width: "100%", padding: "14px", background: "#2d6a4f", color: "#fff", border: "none", borderRadius: 12, fontSize: 16, fontWeight: 700, cursor: "pointer", fontFamily: F, marginTop: 8 },
   secondaryBtn: { display: "block", padding: "14px", background: "#f3f4f6", color: "#374151", border: "none", borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: F },
+  dangerBtn: { display: "block", width: "100%", padding: "14px", background: "#fff", color: "#e74c3c", border: "1.5px solid #fde8e8", borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: F },
   catEditList: { padding: "16px 20px", display: "flex", flexDirection: "column", gap: 10 },
   catEditRow: { display: "flex", gap: 8, alignItems: "center" },
   emojiInput: { width: 44, height: 44, textAlign: "center", fontSize: 20, border: "1.5px solid #e5e7eb", borderRadius: 10, background: "#fafafa", outline: "none" },
   deleteBtn: { background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "#9ca3af", padding: "0 4px" },
   addCatRow: { display: "flex", gap: 8, alignItems: "center", padding: "0 20px", marginTop: 8 },
   addCatBtn: { width: 44, height: 44, borderRadius: 10, background: "#2d6a4f", color: "#fff", border: "none", fontSize: 22, cursor: "pointer", flexShrink: 0 },
+  emptyState: { display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 20px 20px", textAlign: "center" },
+  emptyIcon: { fontSize: 48, marginBottom: 16 },
+  emptyTitle: { fontSize: 18, fontWeight: 700, color: "#111827", margin: 0 },
+  emptyDesc: { fontSize: 14, color: "#6b7280", margin: "8px 0 0", lineHeight: 1.5 },
   monthList: { padding: "16px 20px", display: "flex", flexDirection: "column", gap: 8 },
-  monthCard: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", background: "#fff", border: "1px solid #f0f0f0", borderRadius: 12, cursor: "pointer", fontFamily: F, textAlign: "left", width: "100%" },
-  monthName: { fontSize: 15, fontWeight: 600, color: "#111827", flex: 1 },
-  monthMeta: { fontSize: 13, color: "#6b7280", marginRight: 8 },
+  monthCard: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", background: "#fff", border: "1px solid #f0f0f0", borderRadius: 12, cursor: "pointer", fontFamily: F, textAlign: "left", width: "100%", gap: 8 },
+  monthName: { fontSize: 15, fontWeight: 600, color: "#111827", display: "block" },
+  periodDates: { fontSize: 12, color: "#9ca3af", display: "block", marginTop: 2 },
+  monthMeta: { fontSize: 13, color: "#6b7280", whiteSpace: "nowrap" },
+  historySubtitle: { fontSize: 13, color: "#9ca3af", textAlign: "center", padding: "12px 20px 8px" },
   expenseList: { padding: "0 20px", display: "flex", flexDirection: "column", gap: 8 },
   expenseCard: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "12px 14px", background: "#fff", border: "1px solid #f0f0f0", borderRadius: 12 },
   expenseLeft: { display: "flex", flexDirection: "column", gap: 2 },
